@@ -1,14 +1,10 @@
 use crate::components::Ball;
 use crate::components::Velocity;
-use bevy::core::FixedTimestep;
 use bevy::prelude::*;
-use bevy::ui::entity;
 use components::CustomID;
 use rand::thread_rng;
-use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::io::Read;
 use std::io::Write;
 use std::net::TcpStream;
@@ -32,6 +28,19 @@ struct Connection {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+enum ConnectionType {
+    Init,
+    GetEntity,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ConnectionParams {
+    status: String,
+    connection_type: ConnectionType,
+    data: Option<EntityState>,
+    boundary: Option<(f32, f32)>,
+}
+#[derive(Serialize, Deserialize, Debug)]
 pub struct EntityState {
     entity_atrib: HashMap<u32, Vec3>,
     count: u32,
@@ -50,12 +59,7 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .add_startup_system(setup_system)
         .add_startup_system_to_stage(StartupStage::PostStartup, ball_spawn_system)
-        .add_system_set(
-            SystemSet::new()
-                .with_run_criteria(FixedTimestep::step(2.))
-                .with_system(window_framing_system),
-        )
-        // .add_system(window_framing_system)
+        .add_system(movement_update_system)
         .run();
 }
 
@@ -95,8 +99,13 @@ fn ball_spawn_system(
     let mut ball_count = 1;
     let mut rng = thread_rng();
 
-    //Connect to server and notify that client is connected
-    let message = "Connected";
+    // Connect to server and notify that client is connected
+    let message: ConnectionParams = ConnectionParams {
+        status: "Connected".to_string(),
+        connection_type: ConnectionType::Init,
+        data: None,
+        boundary: None,
+    };
     let serialized = serde_json::to_string(&message).unwrap();
     let _ = connection.stream.write(serialized.as_bytes());
 
@@ -104,57 +113,69 @@ fn ball_spawn_system(
     let mut buffer = [1; 80000];
     let len = connection.stream.read(&mut buffer).unwrap();
     let message = String::from_utf8_lossy(&mut buffer[..len]);
-    let deserialized_entity_state: EntityState = serde_json::from_str(&message).unwrap();
+    let deserialized_entity_state: ConnectionParams = serde_json::from_str(&message).unwrap();
 
-    for (entity, translation) in deserialized_entity_state.entity_atrib.iter() {
-        let trans_x: f32 = rng.gen_range(-500. ..500.);
-        let trans_y: f32 = rng.gen_range(-500. ..500.);
-        commands
-            .spawn_bundle(SpriteBundle {
-                texture: game_textures.ball.clone(),
-                transform: Transform {
-                    translation: *translation,
-                    scale: Vec3::new(0.05, 0.05, 0.),
+    if let Some(i) = deserialized_entity_state.data {
+        for (entity, translation) in i.entity_atrib {
+            commands
+                .spawn_bundle(SpriteBundle {
+                    texture: game_textures.ball.clone(),
+                    transform: Transform {
+                        translation: translation,
+                        scale: Vec3::new(0.05, 0.05, 0.),
+                        ..Default::default()
+                    },
                     ..Default::default()
-                },
-                ..Default::default()
-            })
-            .insert(Velocity {
-                x: trans_x,
-                y: trans_x,
-                z: 0.,
-            })
-            .insert(Ball)
-            .insert(CustomID(*entity));
-
-        ball_count += 1;
+                })
+                .insert(Velocity {
+                    x: 0.,
+                    y: 0.,
+                    z: 0.,
+                })
+                .insert(Ball)
+                .insert(CustomID(entity));
+        }
     }
 }
 
-fn window_framing_system(
+fn movement_update_system(
     mut commands: Commands,
     window_size: Res<WinSize>,
     mut connection: ResMut<Connection>,
     mut query: Query<(Entity, &mut CustomID, &mut Transform), With<Ball>>,
 ) {
-    let boundary = window_size.h / 10.;
+    let boundary = (window_size.w, window_size.h);
+
+    let boundary_request = ConnectionParams {
+        connection_type: ConnectionType::GetEntity,
+        status: "Connected".to_string(),
+        data: None,
+        boundary: Some(boundary),
+    };
+
+    println!("{:?}", window_size.w);
 
     //Send the boundary to server here
-    println!("This is the value of boundary {}", boundary);
-    let serialized_boundary = serde_json::to_string(&boundary).unwrap();
+    let serialized_boundary = serde_json::to_string(&boundary_request).unwrap();
     let _ = connection.stream.write(serialized_boundary.as_bytes());
 
     //Read entities from Server
-    let mut buffer = [1; 80000];
+    let mut buffer = [1; 8000];
     let len = connection.stream.read(&mut buffer).unwrap();
     let message = String::from_utf8_lossy(&mut buffer[..len]);
-    let entities_within_bounds: Vec<u32> = serde_json::from_str(&message).unwrap();
 
-    for (entity, customid, transform) in query.iter_mut() {
-        println!("This is printing {:?}", entities_within_bounds);
+    if message.len() > 3 {
+        let entities_within_bounds: EntityState = serde_json::from_str(&message).unwrap();
 
-        if !entities_within_bounds.contains(&customid.0) {
-            commands.entity(entity).despawn();
+        for (entity, customid, mut transform) in query.iter_mut() {
+            for (server_entity, server_translation) in entities_within_bounds.entity_atrib.iter() {
+                if server_entity == &customid.0 {
+                    transform.translation = *server_translation;
+                } else {
+                }
+            }
         }
+    } else {
+        println!("THIS IS THE MESSAGE ############## {}", message);
     }
 }
